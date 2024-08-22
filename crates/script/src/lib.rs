@@ -1,4 +1,9 @@
+//! # foundry-script
+//!
+//! Smart contract scripting.
+
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
+#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
 #[macro_use]
 extern crate tracing;
@@ -6,7 +11,7 @@ extern crate tracing;
 use self::transaction::AdditionalContract;
 use crate::runner::ScriptRunner;
 use alloy_json_abi::{Function, JsonAbi};
-use alloy_primitives::{Address, Bytes, Log, TxKind, U256};
+use alloy_primitives::{hex, Address, Bytes, Log, TxKind, U256};
 use alloy_signer::Signer;
 use broadcast::next_nonce;
 use build::PreprocessedState;
@@ -17,7 +22,6 @@ use forge_verify::RetryArgs;
 use foundry_cli::{opts::CoreBuildArgs, utils::LoadConfig};
 use foundry_common::{
     abi::{encode_function_args, get_func},
-    compile::SkipBuildFilter,
     evm::{Breakpoints, EvmArgs},
     shell, ContractsByArtifact, CONTRACT_MAX_SIZE, SELECTOR_LEN,
 };
@@ -33,24 +37,24 @@ use foundry_config::{
 use foundry_evm::{
     backend::Backend,
     constants::DEFAULT_CREATE2_DEPLOYER,
-    debug::DebugArena,
     executors::ExecutorBuilder,
     inspectors::{
         cheatcodes::{BroadcastableTransactions, ScriptWallets},
         CheatsConfig,
     },
     opts::EvmOpts,
-    traces::Traces,
+    traces::{TraceMode, Traces},
 };
 use foundry_wallets::MultiWalletOpts;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 use yansi::Paint;
 
 mod broadcast;
 mod build;
 mod execute;
 mod multi_sequence;
+mod progress;
 mod providers;
 mod receipts;
 mod runner;
@@ -165,7 +169,10 @@ pub struct ScriptArgs {
     #[arg(long)]
     pub json: bool,
 
-    /// Gas price for legacy transactions, or max fee per gas for EIP1559 transactions.
+    /// Gas price for legacy transactions, or max fee per gas for EIP1559 transactions, either
+    /// specified in wei, or as a string with a unit type.
+    ///
+    /// Examples: 1ether, 10gwei, 0.01ether
     #[arg(
         long,
         env = "ETH_GAS_PRICE",
@@ -173,12 +180,6 @@ pub struct ScriptArgs {
         value_name = "PRICE",
     )]
     pub with_gas_price: Option<U256>,
-
-    /// Skip building files whose names contain the given filter.
-    ///
-    /// `test` and `script` are aliases for `.t.sol` and `.s.sol`.
-    #[arg(long, num_args(1..))]
-    pub skip: Option<Vec<SkipBuildFilter>>,
 
     #[command(flatten)]
     pub opts: CoreBuildArgs,
@@ -196,10 +197,8 @@ pub struct ScriptArgs {
     pub retry: RetryArgs,
 }
 
-// === impl ScriptArgs ===
-
 impl ScriptArgs {
-    async fn preprocess(self) -> Result<PreprocessedState> {
+    pub async fn preprocess(self) -> Result<PreprocessedState> {
         let script_wallets =
             ScriptWallets::new(self.wallets.get_multi_wallet().await?, self.evm_opts.sender);
 
@@ -238,7 +237,7 @@ impl ScriptArgs {
                 .await?;
 
             if pre_simulation.args.debug {
-                pre_simulation.run_debugger()?;
+                return pre_simulation.run_debugger()
             }
 
             if pre_simulation.args.json {
@@ -390,11 +389,9 @@ impl ScriptArgs {
         for (data, to) in result.transactions.iter().flat_map(|txes| {
             txes.iter().filter_map(|tx| {
                 tx.transaction
-                    .input
-                    .clone()
-                    .into_input()
+                    .input()
                     .filter(|data| data.len() > max_size)
-                    .map(|data| (data, tx.transaction.to))
+                    .map(|data| (data, tx.transaction.to()))
             })
         }) {
             let mut offset = 0;
@@ -460,17 +457,19 @@ impl Provider for ScriptArgs {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Serialize)]
 pub struct ScriptResult {
     pub success: bool,
+    #[serde(rename = "raw_logs")]
     pub logs: Vec<Log>,
     pub traces: Traces,
-    pub debug: Option<Vec<DebugArena>>,
     pub gas_used: u64,
     pub labeled_addresses: HashMap<Address, String>,
+    #[serde(skip)]
     pub transactions: Option<BroadcastableTransactions>,
     pub returned: Bytes,
     pub address: Option<Address>,
+    #[serde(skip)]
     pub breakpoints: Breakpoints,
 }
 
@@ -494,11 +493,12 @@ impl ScriptResult {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-struct JsonResult {
+#[derive(Serialize)]
+struct JsonResult<'a> {
     logs: Vec<String>,
-    gas_used: u64,
-    returns: HashMap<String, NestedValue>,
+    returns: &'a HashMap<String, NestedValue>,
+    #[serde(flatten)]
+    result: &'a ScriptResult,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -579,19 +579,23 @@ impl ScriptConfig {
 
         // We need to enable tracing to decode contract names: local or external.
         let mut builder = ExecutorBuilder::new()
-            .inspectors(|stack| stack.trace(true))
+            .inspectors(|stack| {
+                stack
+                    .trace_mode(if debug { TraceMode::Debug } else { TraceMode::Call })
+                    .alphanet(self.evm_opts.alphanet)
+            })
             .spec(self.config.evm_spec_id())
-            .gas_limit(self.evm_opts.gas_limit());
+            .gas_limit(self.evm_opts.gas_limit())
+            .legacy_assertions(self.config.legacy_assertions);
 
         if let Some((known_contracts, script_wallets, target)) = cheats_data {
             builder = builder.inspectors(|stack| {
                 stack
-                    .debug(debug)
                     .cheatcodes(
                         CheatsConfig::new(
                             &self.config,
                             self.evm_opts.clone(),
-                            Some(Arc::new(known_contracts)),
+                            Some(known_contracts),
                             Some(script_wallets),
                             Some(target.version),
                         )

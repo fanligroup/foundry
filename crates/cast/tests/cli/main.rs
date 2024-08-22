@@ -1,9 +1,11 @@
 //! Contains various tests for checking cast commands
 
 use alloy_primitives::{address, b256, Address, B256};
+use anvil::{Hardfork, NodeConfig};
 use foundry_test_utils::{
     casttest,
     rpc::{next_http_rpc_endpoint, next_ws_rpc_endpoint},
+    str,
     util::OutputExt,
 };
 use std::{fs, io::Write, path::Path, str::FromStr};
@@ -77,15 +79,22 @@ casttest!(wallet_address_keystore_with_password_file, |_prj, cmd| {
 
 // tests that `cast wallet sign message` outputs the expected signature
 casttest!(wallet_sign_message_utf8_data, |_prj, cmd| {
-    cmd.args([
-        "wallet",
-        "sign",
-        "--private-key",
-        "0x0000000000000000000000000000000000000000000000000000000000000001",
-        "test",
-    ]);
+    let pk = "0x0000000000000000000000000000000000000000000000000000000000000001";
+    let address = "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf";
+    let msg = "test";
+    let expected = "0xfe28833983d6faa0715c7e8c3873c725ddab6fa5bf84d40e780676e463e6bea20fc6aea97dc273a98eb26b0914e224c8dd5c615ceaab69ddddcf9b0ae3de0e371c";
+
+    cmd.args(["wallet", "sign", "--private-key", pk, msg]);
     let output = cmd.stdout_lossy();
-    assert_eq!(output.trim(), "0xfe28833983d6faa0715c7e8c3873c725ddab6fa5bf84d40e780676e463e6bea20fc6aea97dc273a98eb26b0914e224c8dd5c615ceaab69ddddcf9b0ae3de0e371c");
+    assert_eq!(output.trim(), expected);
+
+    // Success.
+    cmd.cast_fuse()
+        .args(["wallet", "verify", "-a", address, msg, expected])
+        .assert_non_empty_stdout();
+
+    // Fail.
+    cmd.cast_fuse().args(["wallet", "verify", "-a", address, "other msg", expected]).assert_err();
 });
 
 // tests that `cast wallet sign message` outputs the expected signature, given a 0x-prefixed data
@@ -96,9 +105,10 @@ casttest!(wallet_sign_message_hex_data, |_prj, cmd| {
         "--private-key",
         "0x0000000000000000000000000000000000000000000000000000000000000001",
         "0x0000000000000000000000000000000000000000000000000000000000000000",
-    ]);
-    let output = cmd.stdout_lossy();
-    assert_eq!(output.trim(), "0x23a42ca5616ee730ff3735890c32fc7b9491a9f633faca9434797f2c845f5abf4d9ba23bd7edb8577acebaa3644dc5a4995296db420522bb40060f1693c33c9b1c");
+    ]).assert_success().stdout_eq(str![[r#"
+0x23a42ca5616ee730ff3735890c32fc7b9491a9f633faca9434797f2c845f5abf4d9ba23bd7edb8577acebaa3644dc5a4995296db420522bb40060f1693c33c9b1c
+
+"#]]);
 });
 
 // tests that `cast wallet sign typed-data` outputs the expected signature, given a JSON string
@@ -110,9 +120,10 @@ casttest!(wallet_sign_typed_data_string, |_prj, cmd| {
         "0x0000000000000000000000000000000000000000000000000000000000000001",
         "--data",
         "{\"types\": {\"EIP712Domain\": [{\"name\": \"name\",\"type\": \"string\"},{\"name\": \"version\",\"type\": \"string\"},{\"name\": \"chainId\",\"type\": \"uint256\"},{\"name\": \"verifyingContract\",\"type\": \"address\"}],\"Message\": [{\"name\": \"data\",\"type\": \"string\"}]},\"primaryType\": \"Message\",\"domain\": {\"name\": \"example.metamask.io\",\"version\": \"1\",\"chainId\": \"1\",\"verifyingContract\": \"0x0000000000000000000000000000000000000000\"},\"message\": {\"data\": \"Hello!\"}}",
-    ]);
-    let output = cmd.stdout_lossy();
-    assert_eq!(output.trim(), "0x06c18bdc8163219fddc9afaf5a0550e381326474bb757c86dc32317040cf384e07a2c72ce66c1a0626b6750ca9b6c035bf6f03e7ed67ae2d1134171e9085c0b51b");
+    ]).assert_success().stdout_eq(str![[r#"
+0x06c18bdc8163219fddc9afaf5a0550e381326474bb757c86dc32317040cf384e07a2c72ce66c1a0626b6750ca9b6c035bf6f03e7ed67ae2d1134171e9085c0b51b
+
+"#]]);
 });
 
 // tests that `cast wallet sign typed-data` outputs the expected signature, given a JSON file
@@ -130,9 +141,27 @@ casttest!(wallet_sign_typed_data_file, |_prj, cmd| {
             .into_string()
             .unwrap()
             .as_str(),
-    ]);
-    let output = cmd.stdout_lossy();
-    assert_eq!(output.trim(), "0x06c18bdc8163219fddc9afaf5a0550e381326474bb757c86dc32317040cf384e07a2c72ce66c1a0626b6750ca9b6c035bf6f03e7ed67ae2d1134171e9085c0b51b");
+    ]).assert_success().stdout_eq(str![[r#"
+0x06c18bdc8163219fddc9afaf5a0550e381326474bb757c86dc32317040cf384e07a2c72ce66c1a0626b6750ca9b6c035bf6f03e7ed67ae2d1134171e9085c0b51b
+
+"#]]);
+});
+
+// tests that `cast wallet sign-auth message` outputs the expected signature
+casttest!(wallet_sign_auth, |_prj, cmd| {
+    cmd.args([
+        "wallet",
+        "sign-auth",
+        "--private-key",
+        "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "--nonce",
+        "100",
+        "--chain",
+        "1",
+        "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"]).assert_success().stdout_eq(str![[r#"
+0xf85a01947e5f4552091a69125d5dfcb7b8c2659029395bdf6401a0ad489ee0314497c3f06567f3080a46a63908edc1c7cdf2ac2d609ca911212086a065a6ba951c8748dd8634740fe498efb61770097d99ff5fdcb9a863b62ea899f6
+
+"#]]);
 });
 
 // tests that `cast wallet list` outputs the local accounts
@@ -154,6 +183,56 @@ casttest!(wallet_list_local_accounts, |prj, cmd| {
     cmd.cast_fuse().args(["wallet", "list", "--dir", "keystore"]);
     let list_output = cmd.stdout_lossy();
     assert_eq!(list_output.matches('\n').count(), 10);
+});
+
+// tests that `cast wallet new-mnemonic --entropy` outputs the expected mnemonic
+casttest!(wallet_mnemonic_from_entropy, |_prj, cmd| {
+    cmd.args(["wallet", "new-mnemonic", "--entropy", "0xdf9bf37e6fcdf9bf37e6fcdf9bf37e3c"]);
+    let output = cmd.stdout_lossy();
+    assert!(output.contains("test test test test test test test test test test test junk"));
+});
+
+// tests that `cast wallet private-key` with arguments outputs the private key
+casttest!(wallet_private_key_from_mnemonic_arg, |_prj, cmd| {
+    cmd.args([
+        "wallet",
+        "private-key",
+        "test test test test test test test test test test test junk",
+        "1",
+    ])
+    .assert_success()
+    .stdout_eq(str![[r#"
+0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
+
+"#]]);
+});
+
+// tests that `cast wallet private-key` with options outputs the private key
+casttest!(wallet_private_key_from_mnemonic_option, |_prj, cmd| {
+    cmd.args([
+        "wallet",
+        "private-key",
+        "--mnemonic",
+        "test test test test test test test test test test test junk",
+        "--mnemonic-index",
+        "1",
+    ]);
+    let output = cmd.stdout_lossy();
+    assert_eq!(output.trim(), "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d");
+});
+
+// tests that `cast wallet private-key` with derivation path outputs the private key
+casttest!(wallet_private_key_with_derivation_path, |_prj, cmd| {
+    cmd.args([
+        "wallet",
+        "private-key",
+        "--mnemonic",
+        "test test test test test test test test test test test junk",
+        "--mnemonic-derivation-path",
+        "m/44'/60'/0'/0/1",
+    ]);
+    let output = cmd.stdout_lossy();
+    assert_eq!(output.trim(), "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d");
 });
 
 // tests that `cast wallet import` creates a keystore for a private key and that `cast wallet
@@ -849,6 +928,40 @@ interface Interface {
     assert_eq!(output.trim(), s);
 });
 
+// tests that fetches WETH interface from etherscan
+// <https://etherscan.io/token/0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2>
+casttest!(fetch_weth_interface_from_etherscan, |_prj, cmd| {
+    let weth_address = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
+    let api_key = "ZUB97R31KSYX7NYVW6224Q6EYY6U56H591";
+    cmd.args(["interface", "--etherscan-api-key", api_key, weth_address]);
+    let output = cmd.stdout_lossy();
+
+    let weth_interface = r#"// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.4;
+
+interface WETH9 {
+    event Approval(address indexed src, address indexed guy, uint256 wad);
+    event Deposit(address indexed dst, uint256 wad);
+    event Transfer(address indexed src, address indexed dst, uint256 wad);
+    event Withdrawal(address indexed src, uint256 wad);
+
+    fallback() external payable;
+
+    function allowance(address, address) external view returns (uint256);
+    function approve(address guy, uint256 wad) external returns (bool);
+    function balanceOf(address) external view returns (uint256);
+    function decimals() external view returns (uint8);
+    function deposit() external payable;
+    function name() external view returns (string memory);
+    function symbol() external view returns (string memory);
+    function totalSupply() external view returns (uint256);
+    function transfer(address dst, uint256 wad) external returns (bool);
+    function transferFrom(address src, address dst, uint256 wad) external returns (bool);
+    function withdraw(uint256 wad) external;
+}"#;
+    assert_eq!(output.trim(), weth_interface);
+});
+
 const ENS_NAME: &str = "emo.eth";
 const ENS_NAMEHASH: B256 =
     b256!("0a21aaf2f6414aa664deb341d1114351fdb023cad07bf53b28e57c26db681910");
@@ -880,4 +993,78 @@ casttest!(ens_resolve_no_dot_eth, |_prj, cmd| {
     cmd.args(["resolve-name", name, "--rpc-url", &eth_rpc_url, "--verify"]);
     let (_out, err) = cmd.unchecked_output_lossy();
     assert!(err.contains("not found"), "{err:?}");
+});
+
+casttest!(index7201, |_prj, cmd| {
+    let tests =
+        [("example.main", "0x183a6125c38840424c4a85fa12bab2ab606c4b6d0e7cc73c0c06ba5300eab500")];
+    for (id, expected) in tests {
+        cmd.cast_fuse();
+        assert_eq!(cmd.args(["index-erc7201", id]).stdout_lossy().trim(), expected);
+    }
+});
+
+casttest!(index7201_unknown_formula_id, |_prj, cmd| {
+    cmd.args(["index-7201", "test", "--formula-id", "unknown"]).assert_err();
+});
+
+casttest!(block_number, |_prj, cmd| {
+    let eth_rpc_url = next_http_rpc_endpoint();
+    let s = cmd.args(["block-number", "--rpc-url", eth_rpc_url.as_str()]).stdout_lossy();
+    assert!(s.trim().parse::<u64>().unwrap() > 0, "{s}")
+});
+
+casttest!(block_number_latest, |_prj, cmd| {
+    let eth_rpc_url = next_http_rpc_endpoint();
+    let s = cmd.args(["block-number", "--rpc-url", eth_rpc_url.as_str(), "latest"]).stdout_lossy();
+    assert!(s.trim().parse::<u64>().unwrap() > 0, "{s}")
+});
+
+casttest!(block_number_hash, |_prj, cmd| {
+    let eth_rpc_url = next_http_rpc_endpoint();
+    let s = cmd
+        .args([
+            "block-number",
+            "--rpc-url",
+            eth_rpc_url.as_str(),
+            "0x88e96d4537bea4d9c05d12549907b32561d3bf31f45aae734cdc119f13406cb6",
+        ])
+        .stdout_lossy();
+    assert_eq!(s.trim().parse::<u64>().unwrap(), 1, "{s}")
+});
+
+casttest!(send_eip7702, async |_prj, cmd| {
+    let (_api, handle) =
+        anvil::spawn(NodeConfig::test().with_hardfork(Some(Hardfork::PragueEOF))).await;
+    let endpoint = handle.http_endpoint();
+    cmd.args([
+        "send",
+        "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "--auth",
+        "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+        "--private-key",
+        "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+        "--rpc-url",
+        &endpoint,
+    ])
+    .assert_success();
+
+    cmd.cast_fuse()
+        .args(["code", "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266", "--rpc-url", &endpoint])
+        .assert_success()
+        .stdout_eq(str![[r#"
+0xef010070997970c51812dc3a010c7d01b50e0d17dc79c8
+
+"#]]);
+});
+
+casttest!(hash_message, |_prj, cmd| {
+    let tests = [
+        ("hello", "0x50b2c43fd39106bafbba0da34fc430e1f91e3c96ea2acee2bc34119f92b37750"),
+        ("0x68656c6c6f", "0x50b2c43fd39106bafbba0da34fc430e1f91e3c96ea2acee2bc34119f92b37750"),
+    ];
+    for (message, expected) in tests {
+        cmd.cast_fuse();
+        assert_eq!(cmd.args(["hash-message", message]).stdout_lossy().trim(), expected);
+    }
 });

@@ -4,6 +4,7 @@ use rustc_hash::FxHashMap;
 /// Maps from program counter to instruction counter.
 ///
 /// Inverse of [`IcPcMap`].
+#[derive(Debug, Clone)]
 pub struct PcIcMap {
     pub inner: FxHashMap<usize, usize>,
 }
@@ -12,6 +13,16 @@ impl PcIcMap {
     /// Creates a new `PcIcMap` for the given code.
     pub fn new(code: &[u8]) -> Self {
         Self { inner: make_map::<true>(code) }
+    }
+
+    /// Returns the length of the map.
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Returns `true` if the map is empty.
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
     }
 
     /// Returns the instruction counter for the given program counter.
@@ -31,6 +42,16 @@ impl IcPcMap {
     /// Creates a new `IcPcMap` for the given code.
     pub fn new(code: &[u8]) -> Self {
         Self { inner: make_map::<false>(code) }
+    }
+
+    /// Returns the length of the map.
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Returns `true` if the map is empty.
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
     }
 
     /// Returns the program counter for the given instruction counter.

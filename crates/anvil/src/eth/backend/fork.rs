@@ -1,17 +1,23 @@
 //! Support for forking off another client
 
-use crate::eth::{backend::db::Db, error::BlockchainError};
+use crate::eth::{backend::db::Db, error::BlockchainError, pool::transactions::PoolTransaction};
+use alloy_consensus::Account;
+use alloy_eips::eip2930::AccessListResult;
 use alloy_primitives::{Address, Bytes, StorageValue, B256, U256};
-use alloy_provider::{ext::DebugApi, Provider};
+use alloy_provider::{
+    ext::{DebugApi, TraceApi},
+    Provider,
+};
 use alloy_rpc_types::{
-    request::TransactionRequest, AccessListWithGasUsed, Block, BlockId,
-    BlockNumberOrTag as BlockNumber, BlockTransactions, EIP1186AccountProofResponse, FeeHistory,
-    Filter, Log, Transaction, WithOtherFields,
+    request::TransactionRequest,
+    trace::{
+        geth::{GethDebugTracingOptions, GethTrace},
+        parity::LocalizedTransactionTrace as Trace,
+    },
+    Block, BlockId, BlockNumberOrTag as BlockNumber, BlockTransactions,
+    EIP1186AccountProofResponse, FeeHistory, Filter, Log, Transaction,
 };
-use alloy_rpc_types_trace::{
-    geth::{GethDebugTracingOptions, GethTrace},
-    parity::LocalizedTransactionTrace as Trace,
-};
+use alloy_serde::WithOtherFields;
 use alloy_transport::TransportError;
 use anvil_core::eth::transaction::{convert_to_anvil_receipt, ReceiptResponse};
 use foundry_common::provider::{ProviderBuilder, RetryProvider};
@@ -38,8 +44,6 @@ pub struct ClientFork {
     /// This also holds a handle to the underlying database
     pub database: Arc<AsyncRwLock<Box<dyn Db>>>,
 }
-
-// === impl ClientFork ===
 
 impl ClientFork {
     /// Creates a new instance of the fork
@@ -74,8 +78,10 @@ impl ClientFork {
         }
 
         let provider = self.provider();
-        let block =
-            provider.get_block(block_number, false).await?.ok_or(BlockchainError::BlockNotFound)?;
+        let block = provider
+            .get_block(block_number, false.into())
+            .await?
+            .ok_or(BlockchainError::BlockNotFound)?;
         let block_hash = block.header.hash.ok_or(BlockchainError::BlockNotFound)?;
         let timestamp = block.header.timestamp;
         let base_fee = block.header.base_fee_per_gas;
@@ -112,6 +118,11 @@ impl ClientFork {
 
     pub fn block_number(&self) -> u64 {
         self.config.read().block_number
+    }
+
+    /// Returns the transaction hash we forked off of, if any.
+    pub fn transaction_hash(&self) -> Option<B256> {
+        self.config.read().transaction_hash
     }
 
     pub fn total_difficulty(&self) -> U256 {
@@ -185,7 +196,7 @@ impl ClientFork {
         block: Option<BlockNumber>,
     ) -> Result<u128, TransportError> {
         let block = block.unwrap_or_default();
-        let res = self.provider().estimate_gas(request).block_id(block.into()).await?;
+        let res = self.provider().estimate_gas(request).block(block.into()).await?;
 
         Ok(res)
     }
@@ -195,7 +206,7 @@ impl ClientFork {
         &self,
         request: &WithOtherFields<TransactionRequest>,
         block: Option<BlockNumber>,
-    ) -> Result<AccessListWithGasUsed, TransportError> {
+    ) -> Result<AccessListResult, TransportError> {
         self.provider().create_access_list(request).block_id(block.unwrap_or_default().into()).await
     }
 
@@ -255,6 +266,15 @@ impl ClientFork {
     pub async fn get_nonce(&self, address: Address, block: u64) -> Result<u64, TransportError> {
         trace!(target: "backend::fork", "get_nonce={:?}", address);
         self.provider().get_transaction_count(address).block_id(block.into()).await
+    }
+
+    pub async fn get_account(
+        &self,
+        address: Address,
+        blocknumber: u64,
+    ) -> Result<Account, TransportError> {
+        trace!(target: "backend::fork", "get_account={:?}", address);
+        self.provider().get_account(address).block_id(blocknumber.into()).await
     }
 
     pub async fn transaction_by_block_number_and_index(
@@ -397,7 +417,7 @@ impl ClientFork {
         // Since alloy doesn't indicate in the result whether the block exists,
         // this is being temporarily implemented in anvil.
         if self.predates_fork_inclusive(number) {
-            let receipts = self.provider().get_block_receipts(BlockNumber::Number(number)).await?;
+            let receipts = self.provider().get_block_receipts(BlockId::from(number)).await?;
             let receipts = receipts
                 .map(|r| {
                     r.into_iter()
@@ -481,7 +501,7 @@ impl ClientFork {
         &self,
         block_id: impl Into<BlockId>,
     ) -> Result<Option<Block>, TransportError> {
-        if let Some(block) = self.provider().get_block(block_id.into(), true).await? {
+        if let Some(block) = self.provider().get_block(block_id.into(), true.into()).await? {
             let hash = block.header.hash.unwrap();
             let block_number = block.header.number.unwrap();
             let mut storage = self.storage_write();
@@ -558,7 +578,7 @@ impl ClientFork {
         };
         let mut transactions = Vec::with_capacity(block_txs_len);
         for tx in block.transactions.hashes() {
-            if let Some(tx) = storage.transactions.get(tx).cloned() {
+            if let Some(tx) = storage.transactions.get(&tx).cloned() {
                 transactions.push(tx.inner);
             }
         }
@@ -575,6 +595,8 @@ pub struct ClientForkConfig {
     pub block_number: u64,
     /// The hash of the forked block
     pub block_hash: B256,
+    /// The transaction hash we forked off of, if any.
+    pub transaction_hash: Option<B256>,
     // TODO make provider agnostic
     pub provider: Arc<RetryProvider>,
     pub chain_id: u64,
@@ -597,9 +619,9 @@ pub struct ClientForkConfig {
     pub compute_units_per_second: u64,
     /// total difficulty of the chain until this block
     pub total_difficulty: U256,
+    /// Transactions to force include in the forked chain
+    pub force_transactions: Option<Vec<PoolTransaction>>,
 }
-
-// === impl ClientForkConfig ===
 
 impl ClientForkConfig {
     /// Updates the provider URL
@@ -612,8 +634,8 @@ impl ClientForkConfig {
         self.provider = Arc::new(
             ProviderBuilder::new(url.as_str())
                 .timeout(self.timeout)
-                .timeout_retry(self.retries)
-                .max_retry(10)
+                // .timeout_retry(self.retries)
+                .max_retry(self.retries)
                 .initial_backoff(self.backoff.as_millis() as u64)
                 .compute_units_per_second(self.compute_units_per_second)
                 .build()
@@ -658,8 +680,6 @@ pub struct ForkedStorage {
     pub block_receipts: HashMap<u64, Vec<ReceiptResponse>>,
     pub code_at: HashMap<(Address, u64), Bytes>,
 }
-
-// === impl ForkedStorage ===
 
 impl ForkedStorage {
     /// Clears all data

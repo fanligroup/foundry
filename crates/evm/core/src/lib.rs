@@ -2,7 +2,8 @@
 //!
 //! Core EVM abstractions.
 
-#![warn(unused_crate_dependencies)]
+#![cfg_attr(not(test), warn(unused_crate_dependencies))]
+#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
 use auto_impl::auto_impl;
 use revm::{inspectors::NoOpInspector, interpreter::CreateInputs, Database, EvmContext, Inspector};
@@ -11,16 +12,20 @@ use revm_inspectors::access_list::AccessListInspector;
 #[macro_use]
 extern crate tracing;
 
+pub mod abi {
+    pub use foundry_cheatcodes_spec::Vm;
+    pub use foundry_evm_abi::*;
+}
+
 mod ic;
 
-pub mod abi;
 pub mod backend;
 pub mod constants;
-pub mod debug;
 pub mod decode;
 pub mod fork;
 pub mod opcodes;
 pub mod opts;
+pub mod precompiles;
 pub mod snapshot;
 pub mod utils;
 
@@ -37,6 +42,13 @@ pub trait InspectorExt<DB: Database>: Inspector<DB> {
         _context: &mut EvmContext<DB>,
         _inputs: &mut CreateInputs,
     ) -> bool {
+        false
+    }
+
+    // Simulates `console.log` invocation.
+    fn console_log(&mut self, _input: String) {}
+
+    fn is_alphanet(&self) -> bool {
         false
     }
 }

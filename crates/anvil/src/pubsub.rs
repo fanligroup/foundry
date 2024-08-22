@@ -3,7 +3,7 @@ use crate::{
     StorageInfo,
 };
 use alloy_primitives::{TxHash, B256};
-use alloy_rpc_types::{pubsub::SubscriptionResult, FilteredParams, Log};
+use alloy_rpc_types::{pubsub::SubscriptionResult, FilteredParams, Log, Transaction};
 use anvil_core::eth::{block::Block, subscription::SubscriptionId, transaction::TypedReceipt};
 use anvil_rpc::{request::Version, response::ResponseResult};
 use futures::{channel::mpsc::Receiver, ready, Stream, StreamExt};
@@ -23,8 +23,6 @@ pub struct LogsSubscription {
     pub queued: VecDeque<Log>,
     pub id: SubscriptionId,
 }
-
-// === impl LogsSubscription ===
 
 impl LogsSubscription {
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Option<EthSubscriptionResponse>> {
@@ -68,8 +66,6 @@ pub struct EthSubscriptionResponse {
     params: EthSubscriptionParams,
 }
 
-// === impl EthSubscriptionResponse ===
-
 impl EthSubscriptionResponse {
     pub fn new(params: EthSubscriptionParams) -> Self {
         Self { jsonrpc: Version::V2, method: "eth_subscription", params }
@@ -92,13 +88,11 @@ pub enum EthSubscription {
     PendingTransactions(Receiver<TxHash>, SubscriptionId),
 }
 
-// === impl EthSubscription ===
-
 impl EthSubscription {
     fn poll_response(&mut self, cx: &mut Context<'_>) -> Poll<Option<EthSubscriptionResponse>> {
         match self {
-            EthSubscription::Logs(listener) => listener.poll(cx),
-            EthSubscription::Header(blocks, storage, id) => {
+            Self::Logs(listener) => listener.poll(cx),
+            Self::Header(blocks, storage, id) => {
                 // this loop ensures we poll the receiver until it is pending, in which case the
                 // underlying `UnboundedReceiver` will register the new waker, see
                 // [`futures::channel::mpsc::UnboundedReceiver::poll_next()`]
@@ -116,9 +110,9 @@ impl EthSubscription {
                     }
                 }
             }
-            EthSubscription::PendingTransactions(tx, id) => {
+            Self::PendingTransactions(tx, id) => {
                 let res = ready!(tx.poll_next_unpin(cx))
-                    .map(SubscriptionResult::TransactionHash)
+                    .map(SubscriptionResult::<Transaction>::TransactionHash)
                     .map(to_rpc_result)
                     .map(|result| {
                         let params = EthSubscriptionParams { subscription: id.clone(), result };

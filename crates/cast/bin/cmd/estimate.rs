@@ -1,4 +1,4 @@
-use crate::tx::CastTxBuilder;
+use crate::tx::{CastTxBuilder, SenderKind};
 use alloy_primitives::{TxKind, U256};
 use alloy_provider::Provider;
 use alloy_rpc_types::BlockId;
@@ -67,11 +67,11 @@ pub enum EstimateSubcommands {
 
 impl EstimateArgs {
     pub async fn run(self) -> Result<()> {
-        let EstimateArgs { to, mut sig, mut args, mut tx, block, eth, command } = self;
+        let Self { to, mut sig, mut args, mut tx, block, eth, command } = self;
 
         let config = Config::from(&eth);
         let provider = utils::get_provider(&config)?;
-        let sender = eth.wallet.sender().await;
+        let sender = SenderKind::from_wallet_opts(eth.wallet).await?;
 
         let tx_kind = if let Some(to) = to {
             TxKind::Call(to.resolve(&provider).await?)
@@ -104,7 +104,7 @@ impl EstimateArgs {
             .build_raw(sender)
             .await?;
 
-        let gas = provider.estimate_gas(&tx).block_id(block.unwrap_or_default()).await?;
+        let gas = provider.estimate_gas(&tx).block(block.unwrap_or_default()).await?;
         println!("{gas}");
         Ok(())
     }

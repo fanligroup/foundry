@@ -3,6 +3,7 @@
 use crate::{config::*, test_helpers::TEST_DATA_DEFAULT};
 use alloy_primitives::{Bytes, U256};
 use forge::{
+    decode::decode_console_logs,
     fuzz::CounterExample,
     result::{SuiteResult, TestStatus},
 };
@@ -31,7 +32,7 @@ async fn test_fuzz() {
                     "Test {} did not pass as expected.\nReason: {:?}\nLogs:\n{}",
                     test_name,
                     result.reason,
-                    result.decoded_logs.join("\n")
+                    decode_console_logs(&result.logs).join("\n")
                 ),
                 _ => assert_eq!(
                     result.status,
@@ -39,7 +40,7 @@ async fn test_fuzz() {
                     "Test {} did not fail as expected.\nReason: {:?}\nLogs:\n{}",
                     test_name,
                     result.reason,
-                    result.decoded_logs.join("\n")
+                    decode_console_logs(&result.logs).join("\n")
                 ),
             }
         }
@@ -67,7 +68,7 @@ async fn test_successful_fuzz_cases() {
                     "Test {} did not pass as expected.\nReason: {:?}\nLogs:\n{}",
                     test_name,
                     result.reason,
-                    result.decoded_logs.join("\n")
+                    decode_console_logs(&result.logs).join("\n")
                 ),
                 _ => {}
             }
@@ -158,7 +159,7 @@ async fn test_persist_fuzz_failure() {
 async fn test_scrape_bytecode() {
     let filter = Filter::new(".*", ".*", ".*fuzz/FuzzScrapeBytecode.t.sol");
     let mut runner = TEST_DATA_DEFAULT.runner();
-    runner.test_options.fuzz.runs = 750;
+    runner.test_options.fuzz.runs = 2000;
     runner.test_options.fuzz.seed = Some(U256::from(6u32));
     let suite_result = runner.test_collect(&filter);
 

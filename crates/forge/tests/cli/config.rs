@@ -4,17 +4,17 @@ use alloy_primitives::{Address, B256, U256};
 use foundry_cli::utils as forge_utils;
 use foundry_compilers::{
     artifacts::{BytecodeHash, OptimizerDetails, RevertStrings, YulDetails},
-    compilers::{solc::SolcVersionManager, CompilerVersionManager},
+    solc::Solc,
 };
 use foundry_config::{
     cache::{CachedChains, CachedEndpoints, StorageCachingConfig},
     fs_permissions::{FsAccessPermission, PathPermission},
-    Config, FsPermissions, FuzzConfig, InvariantConfig, Language, SolcReq,
+    Config, FsPermissions, FuzzConfig, InvariantConfig, SolcReq,
 };
 use foundry_evm::opts::EvmOpts;
 use foundry_test_utils::{
-    foundry_compilers::{remappings::Remapping, EvmVersion},
-    util::{pretty_err, OutputExt, TestCommand, OTHER_SOLC_VERSION},
+    foundry_compilers::artifacts::{remappings::Remapping, EvmVersion},
+    util::{pretty_err, TestCommand, OTHER_SOLC_VERSION},
 };
 use path_slash::PathBufExt;
 use similar_asserts::assert_eq;
@@ -29,7 +29,7 @@ forgetest!(can_extract_config_values, |prj, cmd| {
     // explicitly set all values
     let input = Config {
         profile: Config::DEFAULT_PROFILE,
-        __root: Default::default(),
+        root: Default::default(),
         src: "test-src".into(),
         test: "test-test".into(),
         script: "test-script".into(),
@@ -64,12 +64,17 @@ forgetest!(can_extract_config_values, |prj, cmd| {
         contract_pattern_inverse: None,
         path_pattern: None,
         path_pattern_inverse: None,
+        coverage_pattern_inverse: None,
+        test_failures_file: "test-cache/test-failures".into(),
+        threads: None,
+        show_progress: false,
         fuzz: FuzzConfig {
             runs: 1000,
             max_test_rejects: 100203,
             seed: Some(U256::from(1000)),
             failure_persist_dir: Some("test-cache/fuzz".into()),
             failure_persist_file: Some("failures".to_string()),
+            show_logs: false,
             ..Default::default()
         },
         invariant: InvariantConfig {
@@ -102,7 +107,7 @@ forgetest!(can_extract_config_values, |prj, cmd| {
         etherscan_api_key: None,
         etherscan: Default::default(),
         verbosity: 4,
-        remappings: vec![Remapping::from_str("forge-std=lib/forge-std/").unwrap().into()],
+        remappings: vec![Remapping::from_str("forge-std/=lib/forge-std/").unwrap().into()],
         libraries: vec![
             "src/DssSpell.sol:DssExecLib:0x8De6DDbCd5053d32292AAA0D2105A32d108484a6".to_string()
         ],
@@ -129,15 +134,22 @@ forgetest!(can_extract_config_values, |prj, cmd| {
         build_info_path: None,
         fmt: Default::default(),
         doc: Default::default(),
+        bind_json: Default::default(),
         fs_permissions: Default::default(),
         labels: Default::default(),
-        prague: true,
         isolate: true,
         unchecked_cheatcode_artifacts: false,
         create2_library_salt: Config::DEFAULT_CREATE2_LIBRARY_SALT,
-        lang: Language::Solidity,
-        __non_exhaustive: (),
-        __warnings: vec![],
+        vyper: Default::default(),
+        skip: vec![],
+        dependencies: Default::default(),
+        warnings: vec![],
+        assertions_revert: true,
+        legacy_assertions: false,
+        extra_args: vec![],
+        eof_version: None,
+        alphanet: false,
+        _non_exhaustive: (),
     };
     prj.write_config(input.clone());
     let config = cmd.config();
@@ -365,8 +377,7 @@ contract Foo {}
     assert!(cmd.stderr_lossy().contains("`solc` this/solc/does/not/exist does not exist"));
 
     // `OTHER_SOLC_VERSION` was installed in previous step, so we can use the path to this directly
-    let local_solc =
-        SolcVersionManager::default().get_or_install(&OTHER_SOLC_VERSION.parse().unwrap()).unwrap();
+    let local_solc = Solc::find_or_install(&OTHER_SOLC_VERSION.parse().unwrap()).unwrap();
     cmd.forge_fuse().args(["build", "--force", "--use"]).arg(local_solc.solc).root_arg();
     let stdout = cmd.stdout_lossy();
     assert!(stdout.contains("Compiler run successful"));
@@ -388,11 +399,17 @@ contract Foo {
     )
     .unwrap();
 
-    cmd.arg("build");
-    cmd.unchecked_output().stderr_matches_path(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/can_set_yul_optimizer.stderr"),
-    );
+    cmd.arg("build").assert_failure().stderr_eq(str![[r#"
+...
+Error:[..]
+Compiler run failed:
+Error (6553): The msize instruction cannot be used when the Yul optimizer is activated because it can change its semantics. Either disable the Yul optimizer or do not use the instruction.
+ --> src/foo.sol:6:8:
+  |
+6 |        assembly {
+  |        ^ (Relevant source part starts here and spans across multiple lines).
+...
+"#]]);
 
     // disable yul optimizer explicitly
     let config = Config {
@@ -446,7 +463,6 @@ forgetest!(can_set_gas_price, |prj, cmd| {
 forgetest_init!(can_detect_lib_foundry_toml, |prj, cmd| {
     let config = cmd.config();
     let remappings = config.remappings.iter().cloned().map(Remapping::from).collect::<Vec<_>>();
-    dbg!(&remappings);
     similar_asserts::assert_eq!(
         remappings,
         vec![

@@ -1,7 +1,8 @@
 //! Contains various tests for checking forge's commands
 
 use crate::constants::*;
-use foundry_compilers::{artifacts::Metadata, remappings::Remapping, ConfigurableContractArtifact};
+use alloy_primitives::hex;
+use foundry_compilers::artifacts::{remappings::Remapping, ConfigurableContractArtifact, Metadata};
 use foundry_config::{
     parse_with_profile, BasicConfig, Chain, Config, FuzzConfig, InvariantConfig, SolidityErrorCode,
 };
@@ -12,8 +13,8 @@ use foundry_test_utils::{
 };
 use semver::Version;
 use std::{
-    env, fs,
-    path::{Path, PathBuf},
+    fs,
+    path::Path,
     process::{Command, Stdio},
     str::FromStr,
 };
@@ -233,11 +234,20 @@ forgetest!(can_detect_dirty_git_status_on_init, |prj, cmd| {
     fs::create_dir_all(&nested).unwrap();
 
     cmd.current_dir(&nested);
-    cmd.arg("init");
-    cmd.unchecked_output().stderr_matches_path(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/can_detect_dirty_git_status_on_init.stderr"),
-    );
+    cmd.arg("init").assert_failure().stderr_eq(str![[r#"
+...
+Error:[..]
+The target directory is a part of or on its own an already initialized git repository,
+and it requires clean working and staging areas, including no untracked files.
+
+Check the current git repository's status with `git status`.
+Then, you can track files with `git add ...` and then commit them with `git commit`,
+ignore them in the `.gitignore` file, or run this command again with the `--no-commit` flag.
+
+If none of the previous steps worked, please open an issue at:
+https://github.com/foundry-rs/foundry/issues/new/choose
+...
+"#]]);
 
     // ensure nothing was emitted, dir is empty
     assert!(!nested.read_dir().map(|mut i| i.next().is_some()).unwrap_or_default());
@@ -506,7 +516,21 @@ forgetest!(can_clone_keep_directory_structure, |prj, cmd| {
         "0x33e690aEa97E4Ef25F0d140F1bf044d663091DAf",
     ])
     .arg(prj.root());
-    cmd.assert_non_empty_stdout();
+    let out = cmd.unchecked_output();
+    if out.stdout_lossy().contains("502 Bad Gateway") {
+        // etherscan nginx proxy issue, skip this test:
+        //
+        // stdout:
+        // Downloading the source code of 0x33e690aEa97E4Ef25F0d140F1bf044d663091DAf from
+        // Etherscan... 2024-07-05T11:40:11.801765Z ERROR etherscan: Failed to deserialize
+        // response: expected value at line 1 column 1 res="<html>\r\n<head><title>502 Bad
+        // Gateway</title></head>\r\n<body>\r\n<center><h1>502 Bad
+        // Gateway</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n"
+
+        eprintln!("Skipping test due to 502 Bad Gateway: {}", cmd.make_error_message(&out, false));
+        return
+    }
+    cmd.ensure_success(&out).unwrap();
 
     let s = read_string(&foundry_toml);
     let _config: BasicConfig = parse_with_profile(&s).unwrap().unwrap().1;
@@ -576,7 +600,7 @@ forgetest_init!(can_emit_extra_output, |prj, cmd| {
 
     let artifact_path = prj.paths().artifacts.join(TEMPLATE_CONTRACT_ARTIFACT_JSON);
     let artifact: ConfigurableContractArtifact =
-        foundry_compilers::utils::read_json_file(artifact_path).unwrap();
+        foundry_compilers::utils::read_json_file(&artifact_path).unwrap();
     assert!(artifact.metadata.is_some());
 
     cmd.forge_fuse().args(["build", "--extra-output-files", "metadata", "--force"]).root_arg();
@@ -584,7 +608,7 @@ forgetest_init!(can_emit_extra_output, |prj, cmd| {
 
     let metadata_path =
         prj.paths().artifacts.join(format!("{TEMPLATE_CONTRACT_ARTIFACT_BASE}.metadata.json"));
-    let _artifact: Metadata = foundry_compilers::utils::read_json_file(metadata_path).unwrap();
+    let _artifact: Metadata = foundry_compilers::utils::read_json_file(&metadata_path).unwrap();
 });
 
 // checks that extra output works
@@ -594,7 +618,7 @@ forgetest_init!(can_emit_multiple_extra_output, |prj, cmd| {
 
     let artifact_path = prj.paths().artifacts.join(TEMPLATE_CONTRACT_ARTIFACT_JSON);
     let artifact: ConfigurableContractArtifact =
-        foundry_compilers::utils::read_json_file(artifact_path).unwrap();
+        foundry_compilers::utils::read_json_file(&artifact_path).unwrap();
     assert!(artifact.metadata.is_some());
     assert!(artifact.ir.is_some());
     assert!(artifact.ir_optimized.is_some());
@@ -613,7 +637,7 @@ forgetest_init!(can_emit_multiple_extra_output, |prj, cmd| {
 
     let metadata_path =
         prj.paths().artifacts.join(format!("{TEMPLATE_CONTRACT_ARTIFACT_BASE}.metadata.json"));
-    let _artifact: Metadata = foundry_compilers::utils::read_json_file(metadata_path).unwrap();
+    let _artifact: Metadata = foundry_compilers::utils::read_json_file(&metadata_path).unwrap();
 
     let iropt = prj.paths().artifacts.join(format!("{TEMPLATE_CONTRACT_ARTIFACT_BASE}.iropt"));
     std::fs::read_to_string(iropt).unwrap();
@@ -733,11 +757,13 @@ contract ATest is DSTest {
     )
     .unwrap();
 
-    cmd.arg("snapshot");
-
-    cmd.unchecked_output().stdout_matches_path(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/can_check_snapshot.stdout"),
-    );
+    cmd.args(["snapshot"]).assert_success().stdout_eq(str![[r#"
+...
+Ran 1 test for src/ATest.t.sol:ATest
+[PASS] testExample() (gas: 168)
+Suite result: ok. 1 passed; 0 failed; 0 skipped; finished in [..]
+...
+"#]]);
 
     cmd.arg("--check");
     let _ = cmd.output();
@@ -1631,11 +1657,15 @@ forgetest_init!(can_build_skip_contracts, |prj, cmd| {
     prj.clear();
 
     // only builds the single template contract `src/*`
-    cmd.args(["build", "--skip", "tests", "--skip", "scripts"]);
-    cmd.unchecked_output().stdout_matches_path(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/can_build_skip_contracts.stdout"),
-    );
+    cmd.args(["build", "--skip", "tests", "--skip", "scripts"]).assert_success().stdout_eq(str![[
+        r#"
+...
+Compiling 1 files [..]
+[..]
+Compiler run successful!
+...
+"#
+    ]]);
 
     // re-run command
     let out = cmd.stdout_lossy();
@@ -1656,15 +1686,97 @@ function test_run() external {}
 
     // only builds the single template contract `src/*` even if `*.t.sol` or `.s.sol` is absent
     prj.clear();
-    cmd.args(["build", "--skip", "*/test/**", "--skip", "*/script/**", "--force"]);
-    cmd.unchecked_output().stdout_matches_path(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/can_build_skip_glob.stdout"),
-    );
+    cmd.args(["build", "--skip", "*/test/**", "--skip", "*/script/**", "--force"])
+        .assert_success()
+        .stdout_eq(str![[r#"
+...
+Compiling 1 files [..]
+[..]
+Compiler run successful!
+...
+"#]]);
 
-    cmd.forge_fuse().args(["build", "--skip", "./test/**", "--skip", "./script/**", "--force"]);
-    cmd.unchecked_output().stdout_matches_path(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/can_build_skip_glob.stdout"),
-    );
+    cmd.forge_fuse()
+        .args(["build", "--skip", "./test/**", "--skip", "./script/**", "--force"])
+        .assert_success()
+        .stdout_eq(str![[r#"
+...
+Compiling 1 files [..]
+[..]
+Compiler run successful!
+...
+"#]]);
+});
+
+forgetest_init!(can_build_specific_paths, |prj, cmd| {
+    prj.wipe();
+    prj.add_source(
+        "Counter.sol",
+        r"
+contract Counter {
+function count() external {}
+}",
+    )
+    .unwrap();
+    prj.add_test(
+        "Foo.sol",
+        r"
+contract Foo {
+function test_foo() external {}
+}",
+    )
+    .unwrap();
+    prj.add_test(
+        "Bar.sol",
+        r"
+contract Bar {
+function test_bar() external {}
+}",
+    )
+    .unwrap();
+
+    // Build 2 files within test dir
+    prj.clear();
+    cmd.args(["build", "test", "--force"]).assert_success().stdout_eq(str![[r#"
+...
+Compiling 2 files with Solc 0.8.23
+[..]
+Compiler run successful!
+...
+"#]]);
+
+    // Build one file within src dir
+    prj.clear();
+    cmd.forge_fuse();
+    cmd.args(["build", "src", "--force"]).assert_success().stdout_eq(str![[r#"
+...
+Compiling 1 files with Solc 0.8.23
+[..]
+Compiler run successful!
+...
+"#]]);
+
+    // Build 3 files from test and src dirs
+    prj.clear();
+    cmd.forge_fuse();
+    cmd.args(["build", "src", "test", "--force"]).assert_success().stdout_eq(str![[r#"
+...
+Compiling 3 files with Solc 0.8.23
+[..]
+Compiler run successful!
+...
+"#]]);
+
+    // Build single test file
+    prj.clear();
+    cmd.forge_fuse();
+    cmd.args(["build", "test/Bar.sol", "--force"]).assert_success().stdout_eq(str![[r#"
+...
+Compiling 1 files with Solc 0.8.23
+[..]
+Compiler run successful!
+...
+"#]]);
 });
 
 // checks that build --sizes includes all contracts even if unchanged
