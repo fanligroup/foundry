@@ -11,14 +11,16 @@ use crate::{
         fees::{INITIAL_BASE_FEE, INITIAL_GAS_PRICE},
         pool::transactions::{PoolTransaction, TransactionOrder},
     },
+    hardfork::{ChainHardfork, OptimismHardfork},
     mem::{self, in_memory_db::MemDb},
-    FeeManager, Hardfork, PrecompileFactory,
+    EthereumHardfork, FeeManager, PrecompileFactory,
 };
 use alloy_genesis::Genesis;
 use alloy_network::AnyNetwork;
 use alloy_primitives::{hex, utils::Unit, BlockNumber, TxHash, U256};
 use alloy_provider::Provider;
-use alloy_rpc_types::{BlockNumberOrTag, Transaction};
+use alloy_rpc_types::{Block, BlockNumberOrTag, Transaction};
+use alloy_serde::WithOtherFields;
 use alloy_signer::Signer;
 use alloy_signer_local::{
     coins_bip39::{English, Mnemonic},
@@ -58,13 +60,14 @@ use yansi::Paint;
 pub const NODE_PORT: u16 = 8545;
 /// Default chain id of the node
 pub const CHAIN_ID: u64 = 31337;
+/// The default gas limit for all transactions
+pub const DEFAULT_GAS_LIMIT: u128 = 30_000_000;
 /// Default mnemonic for dev accounts
 pub const DEFAULT_MNEMONIC: &str = "test test test test test test test test test test test junk";
 
 /// The default IPC endpoint
 pub const DEFAULT_IPC_ENDPOINT: &str =
     if cfg!(unix) { "/tmp/anvil.ipc" } else { r"\\.\pipe\anvil.ipc" };
-
 /// `anvil 0.1.0 (f01b232bc 2022-04-13T23:28:39.493201+00:00)`
 pub const VERSION_MESSAGE: &str = concat!(
     env!("CARGO_PKG_VERSION"),
@@ -90,7 +93,7 @@ pub struct NodeConfig {
     /// Chain ID of the EVM chain
     pub chain_id: Option<u64>,
     /// Default gas limit for all txs
-    pub gas_limit: u128,
+    pub gas_limit: Option<u128>,
     /// If set to `true`, disables the block gas limit
     pub disable_block_gas_limit: bool,
     /// Default gas price for all txs
@@ -100,7 +103,7 @@ pub struct NodeConfig {
     /// Default blob excess gas and price
     pub blob_excess_gas_and_price: Option<BlobExcessGasAndPrice>,
     /// The hardfork to use
-    pub hardfork: Option<Hardfork>,
+    pub hardfork: Option<ChainHardfork>,
     /// Signer accounts that will be initialised with `genesis_balance` in the genesis block
     pub genesis_accounts: Vec<PrivateKeySigner>,
     /// Native token balance of every genesis account in the genesis block
@@ -303,7 +306,20 @@ Gas Limit
 
 {}
 "#,
-            self.gas_limit.green()
+            {
+                if self.disable_block_gas_limit {
+                    "Disabled".to_string()
+                } else {
+                    self.gas_limit.map(|l| l.to_string()).unwrap_or_else(|| {
+                        if self.fork_choice.is_some() {
+                            "Forked".to_string()
+                        } else {
+                            DEFAULT_GAS_LIMIT.to_string()
+                        }
+                    })
+                }
+            }
+            .green()
         );
 
         let _ = write!(
@@ -338,6 +354,13 @@ Genesis Timestamp
             wallet_description.insert("mnemonic".to_string(), phrase);
         };
 
+        let gas_limit = match self.gas_limit {
+            // if we have a disabled flag we should max out the limit
+            Some(_) | None if self.disable_block_gas_limit => Some(u64::MAX.to_string()),
+            Some(limit) => Some(limit.to_string()),
+            _ => None,
+        };
+
         if let Some(fork) = fork {
             json!({
               "available_accounts": available_accounts,
@@ -349,7 +372,7 @@ Genesis Timestamp
               "wallet": wallet_description,
               "base_fee": format!("{}", self.get_base_fee()),
               "gas_price": format!("{}", self.get_gas_price()),
-              "gas_limit": format!("{}", self.gas_limit),
+              "gas_limit": gas_limit,
             })
         } else {
             json!({
@@ -358,7 +381,7 @@ Genesis Timestamp
               "wallet": wallet_description,
               "base_fee": format!("{}", self.get_base_fee()),
               "gas_price": format!("{}", self.get_gas_price()),
-              "gas_limit": format!("{}", self.gas_limit),
+              "gas_limit": gas_limit,
               "genesis_timestamp": format!("{}", self.get_genesis_timestamp()),
             })
         }
@@ -390,7 +413,7 @@ impl Default for NodeConfig {
         let genesis_accounts = AccountGenerator::new(10).phrase(DEFAULT_MNEMONIC).gen();
         Self {
             chain_id: None,
-            gas_limit: 30_000_000,
+            gas_limit: None,
             disable_block_gas_limit: false,
             gas_price: None,
             hardfork: None,
@@ -470,16 +493,23 @@ impl NodeConfig {
         {
             BlobExcessGasAndPrice::new(excess_blob_gas as u64)
         } else {
-            BlobExcessGasAndPrice { blob_gasprice: 0, excess_blob_gas: 0 }
+            // If no excess blob gas is configured, default to 0
+            BlobExcessGasAndPrice::new(0)
         }
     }
 
     /// Returns the hardfork to use
-    pub fn get_hardfork(&self) -> Hardfork {
+    pub fn get_hardfork(&self) -> ChainHardfork {
         if self.alphanet {
-            return Hardfork::PragueEOF;
+            return ChainHardfork::Ethereum(EthereumHardfork::PragueEOF);
         }
-        self.hardfork.unwrap_or_default()
+        if let Some(hardfork) = self.hardfork {
+            return hardfork;
+        }
+        if self.enable_optimism {
+            return OptimismHardfork::default().into();
+        }
+        EthereumHardfork::default().into()
     }
 
     /// Sets a custom code size limit
@@ -540,9 +570,7 @@ impl NodeConfig {
     /// Sets the gas limit
     #[must_use]
     pub fn with_gas_limit(mut self, gas_limit: Option<u128>) -> Self {
-        if let Some(gas_limit) = gas_limit {
-            self.gas_limit = gas_limit;
-        }
+        self.gas_limit = gas_limit;
         self
     }
 
@@ -621,7 +649,7 @@ impl NodeConfig {
 
     /// Sets the hardfork
     #[must_use]
-    pub fn with_hardfork(mut self, hardfork: Option<Hardfork>) -> Self {
+    pub fn with_hardfork(mut self, hardfork: Option<ChainHardfork>) -> Self {
         self.hardfork = hardfork;
         self
     }
@@ -956,7 +984,7 @@ impl NodeConfig {
         let env = revm::primitives::Env {
             cfg: cfg.cfg_env,
             block: BlockEnv {
-                gas_limit: U256::from(self.gas_limit),
+                gas_limit: U256::from(self.gas_limit()),
                 basefee: U256::from(self.get_base_fee()),
                 ..Default::default()
             },
@@ -1069,7 +1097,6 @@ impl NodeConfig {
         let provider = Arc::new(
             ProviderBuilder::new(&eth_rpc_url)
                 .timeout(self.fork_request_timeout)
-                // .timeout_retry(self.fork_request_retries)
                 .initial_backoff(self.fork_retry_backoff.as_millis() as u64)
                 .compute_units_per_second(self.compute_units_per_second)
                 .max_retry(self.fork_request_retries)
@@ -1094,9 +1121,9 @@ impl NodeConfig {
                 let chain_id =
                     provider.get_chain_id().await.expect("Failed to fetch network chain ID");
                 if alloy_chains::NamedChain::Mainnet == chain_id {
-                    let hardfork: Hardfork = fork_block_number.into();
+                    let hardfork: EthereumHardfork = fork_block_number.into();
                     env.handler_cfg.spec_id = hardfork.into();
-                    self.hardfork = Some(hardfork);
+                    self.hardfork = Some(ChainHardfork::Ethereum(hardfork));
                 }
                 Some(U256::from(chain_id))
             } else {
@@ -1135,15 +1162,7 @@ latest block number: {latest_block}"
             panic!("Failed to get block for block number: {fork_block_number}")
         };
 
-        // we only use the gas limit value of the block if it is non-zero and the block gas
-        // limit is enabled, since there are networks where this is not used and is always
-        // `0x0` which would inevitably result in `OutOfGas` errors as soon as the evm is about to record gas, See also <https://github.com/foundry-rs/foundry/issues/3247>
-        let gas_limit = if self.disable_block_gas_limit || block.header.gas_limit == 0 {
-            u64::MAX as u128
-        } else {
-            block.header.gas_limit
-        };
-
+        let gas_limit = self.fork_gas_limit(&block);
         env.block = BlockEnv {
             number: U256::from(fork_block_number),
             timestamp: U256::from(block.header.timestamp),
@@ -1166,9 +1185,10 @@ latest block number: {latest_block}"
                 // the next block
                 let next_block_base_fee = fees.get_next_block_base_fee_per_gas(
                     block.header.gas_used,
-                    block.header.gas_limit,
+                    gas_limit,
                     block.header.base_fee_per_gas.unwrap_or_default(),
                 );
+
                 // update next base fee
                 fees.set_base_fee(next_block_base_fee);
             }
@@ -1193,7 +1213,7 @@ latest block number: {latest_block}"
             }
         }
 
-        let block_hash = block.header.hash.unwrap_or_default();
+        let block_hash = block.header.hash;
 
         let chain_id = if let Some(chain_id) = self.chain_id {
             chain_id
@@ -1212,7 +1232,7 @@ latest block number: {latest_block}"
         };
         let override_chain_id = self.chain_id;
         // apply changes such as difficulty -> prevrandao and chain specifics for current chain id
-        apply_chain_and_block_specific_env_changes(env, &block);
+        apply_chain_and_block_specific_env_changes::<AnyNetwork>(env, &block);
 
         let meta = BlockchainDbMeta::new(*env.env.clone(), eth_rpc_url.clone());
         let block_chain_db = if self.fork_chain_id.is_some() {
@@ -1256,6 +1276,32 @@ latest block number: {latest_block}"
 
         (db, config)
     }
+
+    /// we only use the gas limit value of the block if it is non-zero and the block gas
+    /// limit is enabled, since there are networks where this is not used and is always
+    /// `0x0` which would inevitably result in `OutOfGas` errors as soon as the evm is about to record gas, See also <https://github.com/foundry-rs/foundry/issues/3247>
+    pub(crate) fn fork_gas_limit(&self, block: &Block<WithOtherFields<Transaction>>) -> u128 {
+        if !self.disable_block_gas_limit {
+            if let Some(gas_limit) = self.gas_limit {
+                return gas_limit;
+            } else if block.header.gas_limit > 0 {
+                return block.header.gas_limit;
+            }
+        }
+
+        u64::MAX as u128
+    }
+
+    /// Returns the gas limit for a non forked anvil instance
+    ///
+    /// Checks the config for the `disable_block_gas_limit` flag
+    pub(crate) fn gas_limit(&self) -> u128 {
+        if self.disable_block_gas_limit {
+            return u64::MAX as u128;
+        }
+
+        self.gas_limit.unwrap_or(DEFAULT_GAS_LIMIT)
+    }
 }
 
 /// If the fork choice is a block number, simply return it with an empty list of transactions.
@@ -1283,19 +1329,21 @@ async fn derive_block_and_transactions(
                 .ok_or(eyre::eyre!("Failed to get fork block by number"))?;
 
             // Filter out transactions that are after the fork transaction
-            let filtered_transactions: Vec<&Transaction> = transaction_block
-                .transactions
-                .as_transactions()
-                .ok_or(eyre::eyre!("Failed to get transactions from full fork block"))?
-                .iter()
-                .take_while_inclusive(|&transaction| transaction.hash != transaction_hash.0)
-                .collect();
+            let filtered_transactions: Vec<&alloy_serde::WithOtherFields<Transaction>> =
+                transaction_block
+                    .transactions
+                    .as_transactions()
+                    .ok_or(eyre::eyre!("Failed to get transactions from full fork block"))?
+                    .iter()
+                    .take_while_inclusive(|&transaction| transaction.hash != transaction_hash.0)
+                    .collect();
 
             // Convert the transactions to PoolTransactions
             let force_transactions = filtered_transactions
                 .iter()
                 .map(|&transaction| PoolTransaction::try_from(transaction.clone()))
-                .collect::<Result<Vec<_>, _>>()?;
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| eyre::eyre!("Err converting to pool transactions {e}"))?;
             Ok((transaction_block_number.saturating_sub(1), Some(force_transactions)))
         }
     }
@@ -1354,7 +1402,7 @@ impl PruneStateHistoryConfig {
         !self.enabled || self.max_memory_history.is_some()
     }
 
-    /// Returns tru if this setting was enabled.
+    /// Returns true if this setting was enabled.
     pub fn is_config_enabled(&self) -> bool {
         self.enabled
     }
@@ -1455,7 +1503,7 @@ async fn find_latest_fork_block<P: Provider<T, AnyNetwork>, T: Transport + Clone
     // leeway
     for _ in 0..2 {
         if let Some(block) = provider.get_block(num.into(), false.into()).await? {
-            if block.header.hash.is_some() {
+            if !block.header.hash.is_zero() {
                 break;
             }
         }

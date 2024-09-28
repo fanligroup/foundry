@@ -1,16 +1,16 @@
 use crate::utils::http_provider;
 use alloy_consensus::{transaction::TxEip7702, SignableTransaction};
 use alloy_network::{ReceiptResponse, TransactionBuilder, TxSignerSync};
-use alloy_primitives::{bytes, TxKind, U256};
+use alloy_primitives::{bytes, U256};
 use alloy_provider::Provider;
 use alloy_rpc_types::{Authorization, TransactionRequest};
 use alloy_serde::WithOtherFields;
 use alloy_signer::SignerSync;
-use anvil::{spawn, Hardfork, NodeConfig};
+use anvil::{spawn, EthereumHardfork, NodeConfig};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn can_send_eip7702_tx() {
-    let node_config = NodeConfig::test().with_hardfork(Some(Hardfork::Prague));
+    let node_config = NodeConfig::test().with_hardfork(Some(EthereumHardfork::Prague.into()));
     let (_api, handle) = spawn(node_config).await;
     let provider = http_provider(&handle.http_endpoint());
 
@@ -57,7 +57,7 @@ async fn can_send_eip7702_tx() {
         max_priority_fee_per_gas: eip1559_est.max_priority_fee_per_gas,
         gas_limit: 100000,
         chain_id: 31337,
-        to: TxKind::Call(from),
+        to: from,
         input: bytes!("11112222"),
         authorization_list: vec![authorization],
         ..Default::default()

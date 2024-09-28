@@ -16,7 +16,7 @@ use yansi::Paint;
 /// State of [ProgressBar]s displayed for the given [ScriptSequence].
 #[derive(Debug)]
 pub struct SequenceProgressState {
-    /// The top spinner with containt of the format "Sequence #{id} on {network} | {status}""
+    /// The top spinner with content of the format "Sequence #{id} on {network} | {status}""
     top_spinner: ProgressBar,
     /// Progress bar with the count of transactions.
     txs: ProgressBar,
@@ -168,6 +168,7 @@ impl ScriptProgress {
         sequence_idx: usize,
         deployment_sequence: &mut ScriptSequence,
         provider: &RetryProvider,
+        timeout: u64,
     ) -> Result<()> {
         if deployment_sequence.pending.is_empty() {
             return Ok(());
@@ -180,8 +181,11 @@ impl ScriptProgress {
 
         trace!("Checking status of {count} pending transactions");
 
-        let futs =
-            deployment_sequence.pending.clone().into_iter().map(|tx| check_tx_status(provider, tx));
+        let futs = deployment_sequence
+            .pending
+            .clone()
+            .into_iter()
+            .map(|tx| check_tx_status(provider, tx, timeout));
         let mut tasks = futures::stream::iter(futs).buffer_unordered(10);
 
         let mut errors: Vec<String> = vec![];

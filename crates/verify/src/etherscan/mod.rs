@@ -23,17 +23,16 @@ use foundry_compilers::{artifacts::BytecodeObject, Artifact};
 use foundry_config::{Chain, Config};
 use foundry_evm::constants::DEFAULT_CREATE2_DEPLOYER;
 use futures::FutureExt;
-use once_cell::sync::Lazy;
 use regex::Regex;
 use semver::{BuildMetadata, Version};
-use std::fmt::Debug;
+use std::{fmt::Debug, sync::LazyLock};
 
 mod flatten;
 
 mod standard_json;
 
-pub static RE_BUILD_COMMIT: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?P<commit>commit\.[0-9,a-f]{8})").unwrap());
+pub static RE_BUILD_COMMIT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?P<commit>commit\.[0-9,a-f]{8})").unwrap());
 
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
@@ -453,10 +452,12 @@ async fn ensure_solc_build_metadata(version: Version) -> Result<Version> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::needless_return)]
+
     use super::*;
     use clap::Parser;
     use foundry_common::fs;
-    use foundry_test_utils::forgetest_async;
+    use foundry_test_utils::{forgetest_async, str};
     use tempfile::tempdir;
 
     #[test]
@@ -567,7 +568,12 @@ mod tests {
         prj.add_source("Counter1", "contract Counter {}").unwrap();
         prj.add_source("Counter2", "contract Counter {}").unwrap();
 
-        cmd.args(["build", "--force"]).ensure_execute_success().unwrap();
+        cmd.args(["build", "--force"]).assert_success().stdout_eq(str![[r#"
+[COMPILING_FILES] with [SOLC_VERSION]
+[SOLC_VERSION] [ELAPSED]
+Compiler run successful!
+
+"#]]);
 
         let args = VerifyArgs::parse_from([
             "foundry-cli",

@@ -21,7 +21,7 @@ use foundry_evm_fuzz::{
     strategies::{invariant_strat, override_call_strat, EvmFuzzState},
     FuzzCase, FuzzFixtures, FuzzedCases,
 };
-use foundry_evm_traces::CallTraceArena;
+use foundry_evm_traces::{CallTraceArena, SparsedTraceArena};
 use indicatif::ProgressBar;
 use parking_lot::RwLock;
 use proptest::{
@@ -199,7 +199,9 @@ impl InvariantTest {
 
         let mut invariant_data = self.execution_data.borrow_mut();
         if invariant_data.gas_report_traces.len() < gas_samples {
-            invariant_data.gas_report_traces.push(run.run_traces);
+            invariant_data
+                .gas_report_traces
+                .push(run.run_traces.into_iter().map(|arena| arena.arena).collect());
         }
         invariant_data.fuzz_cases.push(FuzzedCases::new(run.fuzz_runs));
 
@@ -219,7 +221,7 @@ pub struct InvariantTestRun {
     // Contracts created during current invariant run.
     pub created_contracts: Vec<Address>,
     // Traces of each call of the invariant run call sequence.
-    pub run_traces: Vec<CallTraceArena>,
+    pub run_traces: Vec<SparsedTraceArena>,
     // Current depth of invariant run.
     pub depth: u32,
     // Current assume rejects of the invariant run.
@@ -241,7 +243,7 @@ impl InvariantTestRun {
     }
 }
 
-/// Wrapper around any [`Executor`] implementor which provides fuzzing support using [`proptest`].
+/// Wrapper around any [`Executor`] implementer which provides fuzzing support using [`proptest`].
 ///
 /// After instantiation, calling `invariant_fuzz` will proceed to hammer the deployed smart
 /// contracts with inputs, until it finds a counterexample sequence. The provided [`TestRunner`]
@@ -461,7 +463,7 @@ impl<'a> InvariantExecutor<'a> {
             EvmFuzzState::new(self.executor.backend().mem_db(), self.config.dictionary);
 
         // Creates the invariant strategy.
-        let strat = invariant_strat(
+        let strategy = invariant_strat(
             fuzz_state.clone(),
             targeted_senders,
             targeted_contracts.clone(),
@@ -517,7 +519,7 @@ impl<'a> InvariantExecutor<'a> {
                 last_call_results,
                 self.runner.clone(),
             ),
-            strat,
+            strategy,
         ))
     }
 

@@ -128,7 +128,7 @@ pub fn transaction_request_to_typed(
             }))
         }
         // EIP4844
-        (Some(3), None, _, _, _, Some(_), Some(_), Some(sidecar), to) => {
+        (Some(3), None, _, _, _, _, Some(_), Some(sidecar), to) => {
             let tx = TxEip4844 {
                 nonce: nonce.unwrap_or_default(),
                 max_fee_per_gas: max_fee_per_gas.unwrap_or_default(),
@@ -300,7 +300,6 @@ pub fn to_alloy_transaction_with_hash_and_sender(
             transaction_type: None,
             max_fee_per_blob_gas: None,
             blob_versioned_hashes: None,
-            other: Default::default(),
             authorization_list: None,
         },
         TypedTransaction::EIP2930(t) => RpcTransaction {
@@ -328,7 +327,6 @@ pub fn to_alloy_transaction_with_hash_and_sender(
             transaction_type: Some(1),
             max_fee_per_blob_gas: None,
             blob_versioned_hashes: None,
-            other: Default::default(),
             authorization_list: None,
         },
         TypedTransaction::EIP1559(t) => RpcTransaction {
@@ -356,7 +354,6 @@ pub fn to_alloy_transaction_with_hash_and_sender(
             transaction_type: Some(2),
             max_fee_per_blob_gas: None,
             blob_versioned_hashes: None,
-            other: Default::default(),
             authorization_list: None,
         },
         TypedTransaction::EIP4844(t) => RpcTransaction {
@@ -384,7 +381,6 @@ pub fn to_alloy_transaction_with_hash_and_sender(
             transaction_type: Some(3),
             max_fee_per_blob_gas: Some(t.tx().tx().max_fee_per_blob_gas),
             blob_versioned_hashes: Some(t.tx().tx().blob_versioned_hashes.clone()),
-            other: Default::default(),
             authorization_list: None,
         },
         TypedTransaction::EIP7702(t) => RpcTransaction {
@@ -394,7 +390,7 @@ pub fn to_alloy_transaction_with_hash_and_sender(
             block_number: None,
             transaction_index: None,
             from,
-            to: t.tx().to.to().copied(),
+            to: Some(t.tx().to),
             value: t.tx().value,
             gas_price: Some(t.tx().max_fee_per_gas),
             max_fee_per_gas: Some(t.tx().max_fee_per_gas),
@@ -433,7 +429,6 @@ pub fn to_alloy_transaction_with_hash_and_sender(
             transaction_type: None,
             max_fee_per_blob_gas: None,
             blob_versioned_hashes: None,
-            other: Default::default(),
             authorization_list: None,
         },
     }
@@ -607,7 +602,7 @@ impl PendingTransaction {
                 } = tx.tx();
                 TxEnv {
                     caller,
-                    transact_to: *to,
+                    transact_to: TxKind::Call(*to),
                     data: input.clone(),
                     chain_id: Some(*chain_id),
                     nonce: Some(*nonce),
@@ -672,6 +667,36 @@ pub enum TypedTransaction {
     EIP7702(Signed<TxEip7702>),
     /// op-stack deposit transaction
     Deposit(DepositTransaction),
+}
+
+/// This is a function that demotes TypedTransaction to TransactionRequest for greater flexibility
+/// over the type.
+///
+/// This function is purely for convenience and specific use cases, e.g. RLP encoded transactions
+/// decode to TypedTransactions where the API over TypedTransctions is quite strict.
+impl TryFrom<TypedTransaction> for TransactionRequest {
+    type Error = ConversionError;
+
+    fn try_from(value: TypedTransaction) -> Result<Self, Self::Error> {
+        let from = value.recover().map_err(|_| ConversionError::InvalidSignature)?;
+        let essentials = value.essentials();
+        let tx_type = value.r#type();
+        Ok(Self {
+            from: Some(from),
+            to: Some(value.kind()),
+            gas_price: essentials.gas_price,
+            max_fee_per_gas: essentials.max_fee_per_gas,
+            max_priority_fee_per_gas: essentials.max_priority_fee_per_gas,
+            max_fee_per_blob_gas: essentials.max_fee_per_blob_gas,
+            gas: Some(essentials.gas_limit),
+            value: Some(essentials.value),
+            input: essentials.input.into(),
+            nonce: Some(essentials.nonce),
+            chain_id: essentials.chain_id,
+            transaction_type: tx_type,
+            ..Default::default()
+        })
+    }
 }
 
 impl TypedTransaction {
@@ -826,7 +851,7 @@ impl TypedTransaction {
                 access_list: t.tx().tx().access_list.clone(),
             },
             Self::EIP7702(t) => TransactionEssentials {
-                kind: t.tx().to,
+                kind: TxKind::Call(t.tx().to),
                 input: t.tx().input.clone(),
                 nonce: t.tx().nonce,
                 gas_limit: t.tx().gas_limit,
@@ -950,7 +975,7 @@ impl TypedTransaction {
             Self::EIP2930(tx) => tx.tx().to,
             Self::EIP1559(tx) => tx.tx().to,
             Self::EIP4844(tx) => TxKind::Call(tx.tx().tx().to),
-            Self::EIP7702(tx) => tx.tx().to,
+            Self::EIP7702(tx) => TxKind::Call(tx.tx().to),
             Self::Deposit(tx) => tx.kind,
         }
     }
@@ -978,11 +1003,41 @@ impl TypedTransaction {
     }
 }
 
-impl TryFrom<RpcTransaction> for TypedTransaction {
+impl TryFrom<WithOtherFields<RpcTransaction>> for TypedTransaction {
     type Error = ConversionError;
 
-    fn try_from(tx: RpcTransaction) -> Result<Self, Self::Error> {
-        // TODO(sergerad): Handle Arbitrum system transactions?
+    fn try_from(tx: WithOtherFields<RpcTransaction>) -> Result<Self, Self::Error> {
+        if tx.transaction_type.is_some_and(|t| t == 0x7E) {
+            let mint = tx
+                .other
+                .get_deserialized::<U256>("mint")
+                .ok_or(ConversionError::Custom("MissingMint".to_string()))?
+                .map_err(|_| ConversionError::Custom("Cannot deserialize mint".to_string()))?;
+
+            let source_hash = tx
+                .other
+                .get_deserialized::<B256>("sourceHash")
+                .ok_or(ConversionError::Custom("MissingSourceHash".to_string()))?
+                .map_err(|_| {
+                    ConversionError::Custom("Cannot deserialize source hash".to_string())
+                })?;
+
+            let deposit = DepositTransaction {
+                nonce: tx.nonce,
+                is_system_tx: true,
+                from: tx.from,
+                kind: tx.to.map(TxKind::Call).unwrap_or(TxKind::Create),
+                value: tx.value,
+                gas_limit: tx.gas,
+                input: tx.input.clone(),
+                mint,
+                source_hash,
+            };
+
+            return Ok(Self::Deposit(deposit));
+        }
+
+        let tx = tx.inner;
         match tx.transaction_type.unwrap_or_default().try_into()? {
             TxType::Legacy => {
                 let legacy = TxLegacy {
@@ -1080,7 +1135,7 @@ impl TryFrom<RpcTransaction> for TypedTransaction {
                     max_priority_fee_per_gas: tx
                         .max_priority_fee_per_gas
                         .ok_or(ConversionError::MissingMaxPriorityFeePerGas)?,
-                    to: tx.to.map_or(TxKind::Create, TxKind::Call),
+                    to: tx.to.ok_or(ConversionError::MissingTo)?,
                     value: tx.value,
                     access_list: tx.access_list.ok_or(ConversionError::MissingAccessList)?,
                     input: tx.input,
@@ -1381,7 +1436,7 @@ impl From<TypedReceipt<alloy_rpc_types::Log>> for OtsReceipt {
         let receipt = ReceiptWithBloom::<alloy_rpc_types::Log>::from(value);
         let status = receipt.status();
         let cumulative_gas_used = receipt.cumulative_gas_used() as u64;
-        let logs = receipt.receipt.logs.into_iter().map(|x| x.inner).collect();
+        let logs = receipt.logs().to_vec();
         let logs_bloom = receipt.logs_bloom;
 
         Self { status, cumulative_gas_used, logs: Some(logs), logs_bloom: Some(logs_bloom), r#type }

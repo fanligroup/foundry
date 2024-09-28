@@ -1,5 +1,5 @@
 use crate::{
-    abi::{Greeter, MulticallContract, SimpleStorage},
+    abi::{Greeter, Multicall, SimpleStorage},
     utils::{connect_pubsub, http_provider_with_signer},
 };
 use alloy_network::{EthereumWallet, TransactionBuilder};
@@ -10,7 +10,7 @@ use alloy_rpc_types::{
     AccessList, AccessListItem, BlockId, BlockNumberOrTag, BlockTransactions, TransactionRequest,
 };
 use alloy_serde::WithOtherFields;
-use anvil::{spawn, Hardfork, NodeConfig};
+use anvil::{spawn, EthereumHardfork, NodeConfig};
 use eyre::Ok;
 use futures::{future::join_all, FutureExt, StreamExt};
 use std::{collections::HashSet, str::FromStr, time::Duration};
@@ -230,14 +230,14 @@ async fn can_reject_too_high_gas_limits() {
 // <https://github.com/foundry-rs/foundry/issues/8094>
 #[tokio::test(flavor = "multi_thread")]
 async fn can_mine_large_gas_limit() {
-    let (api, handle) = spawn(NodeConfig::test().disable_block_gas_limit(true)).await;
+    let (_, handle) = spawn(NodeConfig::test().disable_block_gas_limit(true)).await;
     let provider = handle.http_provider();
 
     let accounts = handle.dev_wallets().collect::<Vec<_>>();
     let from = accounts[0].address();
     let to = accounts[1].address();
 
-    let gas_limit = api.gas_limit().to::<u128>();
+    let gas_limit = anvil::DEFAULT_GAS_LIMIT;
     let amount = handle.genesis_balance().checked_div(U256::from(3u64)).unwrap();
 
     let tx =
@@ -477,7 +477,7 @@ async fn get_blocktimestamp_works() {
     let (api, handle) = spawn(NodeConfig::test()).await;
     let provider = handle.http_provider();
 
-    let contract = MulticallContract::deploy(provider.clone()).await.unwrap();
+    let contract = Multicall::deploy(provider.clone()).await.unwrap();
 
     let timestamp = contract.getCurrentBlockTimestamp().call().await.unwrap().timestamp;
 
@@ -557,8 +557,7 @@ async fn call_past_state() {
         .unwrap()
         .unwrap()
         .header
-        .hash
-        .unwrap();
+        .hash;
     let value = contract.getValue().block(BlockId::Hash(hash.into())).call().await.unwrap();
     assert_eq!(value._0, "initial value");
 }
@@ -996,7 +995,7 @@ async fn test_tx_access_list() {
 
     let sender = Address::random();
     let other_acc = Address::random();
-    let multicall = MulticallContract::deploy(provider.clone()).await.unwrap();
+    let multicall = Multicall::deploy(provider.clone()).await.unwrap();
     let simple_storage = SimpleStorage::deploy(provider.clone(), "foo".to_string()).await.unwrap();
 
     // when calling `setValue` on SimpleStorage, both the `lastSender` and `_value` storages are
@@ -1044,7 +1043,7 @@ async fn test_tx_access_list() {
 
     // With a subcall to another contract, the AccessList should be the same as when calling the
     // subcontract directly (given that the proxy contract doesn't read/write any state)
-    let subcall_tx = multicall.aggregate(vec![MulticallContract::Call {
+    let subcall_tx = multicall.aggregate(vec![Multicall::Call {
         target: *simple_storage.address(),
         callData: set_value_calldata.to_owned(),
     }]);
@@ -1176,7 +1175,8 @@ async fn can_call_with_high_gas_limit() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_reject_eip1559_pre_london() {
-    let (api, handle) = spawn(NodeConfig::test().with_hardfork(Some(Hardfork::Berlin))).await;
+    let (api, handle) =
+        spawn(NodeConfig::test().with_hardfork(Some(EthereumHardfork::Berlin.into()))).await;
     let provider = handle.http_provider();
 
     let gas_limit = api.gas_limit().to::<u128>();

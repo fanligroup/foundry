@@ -1,15 +1,17 @@
 use alloy_consensus::{SidecarBuilder, SimpleCoder};
 use alloy_json_abi::Function;
-use alloy_network::{AnyNetwork, TransactionBuilder};
+use alloy_network::{
+    AnyNetwork, TransactionBuilder, TransactionBuilder4844, TransactionBuilder7702,
+};
 use alloy_primitives::{hex, Address, Bytes, TxKind, U256};
 use alloy_provider::Provider;
 use alloy_rlp::Decodable;
-use alloy_rpc_types::{Authorization, TransactionInput, TransactionRequest};
+use alloy_rpc_types::{AccessList, Authorization, TransactionInput, TransactionRequest};
 use alloy_serde::WithOtherFields;
 use alloy_signer::Signer;
 use alloy_transport::Transport;
 use cast::revm::primitives::SignedAuthorization;
-use eyre::Result;
+use eyre::{Result, WrapErr};
 use foundry_cli::{
     opts::TransactionOpts,
     utils::{self, parse_function_args},
@@ -17,6 +19,7 @@ use foundry_cli::{
 use foundry_common::ens::NameOrAddress;
 use foundry_config::{Chain, Config};
 use foundry_wallets::{WalletOpts, WalletSigner};
+use serde_json;
 
 /// Different sender kinds used by [`CastTxBuilder`].
 pub enum SenderKind<'a> {
@@ -103,29 +106,14 @@ corresponds to the sender, or let foundry automatically detect it by not specify
     Ok(())
 }
 
-/// Ensures the transaction is either a contract deployment or a recipient address is specified
-pub async fn resolve_tx_kind<P: Provider<T, AnyNetwork>, T: Transport + Clone>(
-    provider: &P,
-    code: &Option<String>,
-    to: &Option<NameOrAddress>,
-) -> Result<TxKind> {
-    if code.is_some() {
-        Ok(TxKind::Create)
-    } else if let Some(to) = to {
-        Ok(TxKind::Call(to.resolve(provider).await?))
-    } else {
-        eyre::bail!("Must specify a recipient address or contract code to deploy");
-    }
-}
-
 /// Initial state.
 #[derive(Debug)]
 pub struct InitState;
 
 /// State with known [TxKind].
 #[derive(Debug)]
-pub struct TxKindState {
-    kind: TxKind,
+pub struct ToState {
+    to: Option<Address>,
 }
 
 /// State with known input for the transaction.
@@ -149,6 +137,7 @@ pub struct CastTxBuilder<T, P, S> {
     auth: Option<String>,
     chain: Chain,
     etherscan_api_key: Option<String>,
+    access_list: Option<Option<String>>,
     state: S,
     _t: std::marker::PhantomData<T>,
 }
@@ -205,14 +194,16 @@ where
             chain,
             etherscan_api_key,
             auth: tx_opts.auth,
+            access_list: tx_opts.access_list,
             state: InitState,
             _t: std::marker::PhantomData,
         })
     }
 
     /// Sets [TxKind] for this builder and changes state to [TxKindState].
-    pub fn with_tx_kind(self, kind: TxKind) -> CastTxBuilder<T, P, TxKindState> {
-        CastTxBuilder {
+    pub async fn with_to(self, to: Option<NameOrAddress>) -> Result<CastTxBuilder<T, P, ToState>> {
+        let to = if let Some(to) = to { Some(to.resolve(&self.provider).await?) } else { None };
+        Ok(CastTxBuilder {
             provider: self.provider,
             tx: self.tx,
             legacy: self.legacy,
@@ -220,13 +211,14 @@ where
             chain: self.chain,
             etherscan_api_key: self.etherscan_api_key,
             auth: self.auth,
-            state: TxKindState { kind },
+            access_list: self.access_list,
+            state: ToState { to },
             _t: self._t,
-        }
+        })
     }
 }
 
-impl<T, P> CastTxBuilder<T, P, TxKindState>
+impl<T, P> CastTxBuilder<T, P, ToState>
 where
     P: Provider<T, AnyNetwork>,
     T: Transport + Clone,
@@ -244,7 +236,7 @@ where
             parse_function_args(
                 &sig,
                 args,
-                self.state.kind.to().cloned(),
+                self.state.to,
                 self.chain,
                 &self.provider,
                 self.etherscan_api_key.as_deref(),
@@ -254,13 +246,23 @@ where
             (Vec::new(), None)
         };
 
-        let input = if let Some(code) = code {
+        let input = if let Some(code) = &code {
             let mut code = hex::decode(code)?;
             code.append(&mut args);
             code
         } else {
             args
         };
+
+        if self.state.to.is_none() && code.is_none() {
+            let has_value = self.tx.value.map_or(false, |v| !v.is_zero());
+            let has_auth = self.auth.is_some();
+            // We only allow user to omit the recipient address if transaction is an EIP-7702 tx
+            // without a value.
+            if !has_auth || has_value {
+                eyre::bail!("Must specify a recipient address or contract code to deploy");
+            }
+        }
 
         Ok(CastTxBuilder {
             provider: self.provider,
@@ -270,7 +272,8 @@ where
             chain: self.chain,
             etherscan_api_key: self.etherscan_api_key,
             auth: self.auth,
-            state: InputState { kind: self.state.kind, input, func },
+            access_list: self.access_list,
+            state: InputState { kind: self.state.to.into(), input, func },
             _t: self._t,
         })
     }
@@ -318,6 +321,20 @@ where
 
         if !fill {
             return Ok((self.tx, self.state.func));
+        }
+
+        if let Some(access_list) = match self.access_list {
+            None => None,
+            // --access-list provided with no value, call the provider to create it
+            Some(None) => Some(self.provider.create_access_list(&self.tx).await?.access_list),
+            // Access list provided as a string, attempt to parse it
+            Some(Some(ref s)) => Some(
+                serde_json::from_str::<AccessList>(s)
+                    .map(AccessList::from)
+                    .wrap_err("Failed to parse access list from string")?,
+            ),
+        } {
+            self.tx.set_access_list(access_list);
         }
 
         if self.legacy && self.tx.gas_price.is_none() {

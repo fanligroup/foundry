@@ -2,7 +2,7 @@ use crate::{bytecode::VerifyBytecodeArgs, types::VerificationType};
 use alloy_dyn_abi::DynSolValue;
 use alloy_primitives::{Address, Bytes, U256};
 use alloy_provider::Provider;
-use alloy_rpc_types::{Block, BlockId, Transaction};
+use alloy_rpc_types::{AnyNetworkBlock, BlockId, Transaction};
 use clap::ValueEnum;
 use eyre::{OptionExt, Result};
 use foundry_block_explorers::{
@@ -307,6 +307,21 @@ pub fn check_explorer_args(source_code: ContractMetadata) -> Result<Bytes, eyre:
     }
 }
 
+pub fn check_args_len(
+    artifact: &CompactContractBytecode,
+    args: &Bytes,
+) -> Result<(), eyre::ErrReport> {
+    if let Some(constructor) = artifact.abi.as_ref().and_then(|abi| abi.constructor()) {
+        if !constructor.inputs.is_empty() && args.len() == 0 {
+            eyre::bail!(
+                "Contract expects {} constructor argument(s), but none were provided",
+                constructor.inputs.len()
+            );
+        }
+    }
+    Ok(())
+}
+
 pub async fn get_tracing_executor(
     fork_config: &mut Config,
     fork_blk_num: u64,
@@ -331,7 +346,7 @@ pub async fn get_tracing_executor(
     Ok((env, executor))
 }
 
-pub fn configure_env_block(env: &mut Env, block: &Block) {
+pub fn configure_env_block(env: &mut Env, block: &AnyNetworkBlock) {
     env.block.timestamp = U256::from(block.header.timestamp);
     env.block.coinbase = block.header.miner;
     env.block.difficulty = block.header.difficulty;

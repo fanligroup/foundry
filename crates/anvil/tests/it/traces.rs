@@ -1,5 +1,5 @@
 use crate::{
-    abi::{MulticallContract, SimpleStorage},
+    abi::{Multicall, SimpleStorage},
     fork::fork_config,
     utils::http_provider_with_signer,
 };
@@ -23,7 +23,7 @@ use alloy_rpc_types::{
 };
 use alloy_serde::WithOtherFields;
 use alloy_sol_types::sol;
-use anvil::{spawn, Hardfork, NodeConfig};
+use anvil::{spawn, EthereumHardfork, NodeConfig};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_get_transfer_parity_traces() {
@@ -75,7 +75,8 @@ sol!(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_parity_suicide_trace() {
-    let (_api, handle) = spawn(NodeConfig::test().with_hardfork(Some(Hardfork::Shanghai))).await;
+    let (_api, handle) =
+        spawn(NodeConfig::test().with_hardfork(Some(EthereumHardfork::Shanghai.into()))).await;
     let provider = handle.ws_provider();
     let wallets = handle.dev_wallets().collect::<Vec<_>>();
     let owner = wallets[0].address();
@@ -154,7 +155,7 @@ async fn test_call_tracer_debug_trace_call() {
     let deployer: EthereumWallet = wallets[0].clone().into();
     let provider = http_provider_with_signer(&handle.http_endpoint(), deployer);
 
-    let multicall_contract = MulticallContract::deploy(&provider).await.unwrap();
+    let multicall_contract = Multicall::deploy(&provider).await.unwrap();
 
     let simple_storage_contract =
         SimpleStorage::deploy(&provider, "init value".to_string()).await.unwrap();
@@ -162,7 +163,7 @@ async fn test_call_tracer_debug_trace_call() {
     let set_value = simple_storage_contract.setValue("bar".to_string());
     let set_value_calldata = set_value.calldata();
 
-    let internal_call_tx_builder = multicall_contract.aggregate(vec![MulticallContract::Call {
+    let internal_call_tx_builder = multicall_contract.aggregate(vec![Multicall::Call {
         target: *simple_storage_contract.address(),
         callData: set_value_calldata.to_owned(),
     }]);
@@ -765,15 +766,15 @@ async fn test_trace_filter() {
     for i in 0..=5 {
         let tx = TransactionRequest::default().to(to).value(U256::from(i)).from(from);
         let tx = WithOtherFields::new(tx);
-        api.send_transaction(tx).await.unwrap();
+        provider.send_transaction(tx).await.unwrap().get_receipt().await.unwrap();
 
         let tx = TransactionRequest::default().to(to_two).value(U256::from(i)).from(from_two);
         let tx = WithOtherFields::new(tx);
-        api.send_transaction(tx).await.unwrap();
+        provider.send_transaction(tx).await.unwrap().get_receipt().await.unwrap();
     }
 
     let traces = api.trace_filter(tracer).await.unwrap();
-    assert_eq!(traces.len(), 5);
+    assert_eq!(traces.len(), 6);
 
     // Test for the following actions:
     // Create (deploy the contract)
@@ -803,11 +804,11 @@ async fn test_trace_filter() {
     for i in 0..=5 {
         let tx = TransactionRequest::default().to(to_two).value(U256::from(i)).from(from_two);
         let tx = WithOtherFields::new(tx);
-        api.send_transaction(tx).await.unwrap();
+        provider.send_transaction(tx).await.unwrap().get_receipt().await.unwrap();
     }
 
     let traces = api.trace_filter(tracer).await.unwrap();
-    assert_eq!(traces.len(), 8);
+    assert_eq!(traces.len(), 9);
 
     // Test Range Error
     let latest = provider.get_block_number().await.unwrap();
@@ -853,7 +854,7 @@ async fn test_trace_filter() {
     for i in 0..=10 {
         let tx = TransactionRequest::default().to(to).value(U256::from(i)).from(from);
         let tx = WithOtherFields::new(tx);
-        api.send_transaction(tx).await.unwrap();
+        provider.send_transaction(tx).await.unwrap().get_receipt().await.unwrap();
     }
 
     let traces = api.trace_filter(tracer).await.unwrap();
