@@ -1,0 +1,1 @@
+searchState.loadedDescShard("forge", 60, "Returns <code>self</code> with the <code>fg()</code> set to [<code>Color :: Yellow</code>].")
