@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["get_nonce","get_state_diff","inner_delete_state_snapshot","inner_delete_state_snapshots","inner_revert_to_state","inner_revert_to_state_and_delete","inner_snapshot_state","journaled_account","read_callers"],"mod":["fork","mapping","mock","prank"],"struct":["DealRecord","RecordAccess"]};
